@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoCrop Hybrid (OBB Supported)</title>
+<style>
+    :root { --primary-color: #3498db; --success-color: #2ecc71; --dark-color: #2c3e50; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
+    .container { padding: 20px; }
+    h1 { text-align: center; color: var(--dark-color); margin-top: 0; }
+
+    .upload-area { border: 2px dashed var(--primary-color); padding: 30px; text-align: center; border-radius: 8px; background: #ebf5fb; cursor: pointer; transition: 0.3s; display: block; margin-bottom: 20px; }
+    .upload-area:hover, .upload-area.dragover { background: #d6eaf8; border-color: #2980b9; }
+    .upload-area-icon { font-size: 36px; margin-bottom: 5px; }
+    input[type="file"] { display: none; }
+
+    .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 15px; background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e9ecef; }
+    .control-group { display: flex; flex-direction: column; }
+    .control-group label { font-weight: bold; margin-bottom: 6px; font-size: 14px; color: #495057; display: flex; justify-content: space-between; }
+    .control-group input[type="range"], .control-group select { width: 100%; box-sizing: border-box; }
+    .control-group.cv-only.disabled { opacity: 0.4; pointer-events: none; }
+    .checkbox-group { grid-column: 1 / -1; background: #eef2f5; padding: 12px; border-radius: 6px; }
+    .checkbox-group label { font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+
+    .preview-section { margin-bottom: 20px; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; background: #fff; }
+    .preview-header { margin-bottom: 12px; font-weight: bold; color: var(--dark-color); font-size: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .preview-header .preview-hint { font-size: 12px; color: #7f8c8d; font-weight: normal; margin-left: 6px; }
+    .preview-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(500px, 100%), 1fr)); gap: 15px; padding-right: 5px; }
+    .preview-card { border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; background: #fafafa; display: flex; flex-direction: column; min-width: 0; cursor: pointer; transition: box-shadow .2s, border-color .2s, transform .2s; content-visibility: auto; contain-intrinsic-size: auto 420px; -webkit-user-select: none; user-select: none; }
+    .preview-card:hover { border-color: var(--primary-color); box-shadow: 0 6px 18px rgba(52,152,219,0.18); transform: translateY(-1px); }
+    .preview-card-title { display: flex; align-items: center; gap: 6px; font-weight: bold; color: #495057; font-size: 13px; margin-bottom: 8px; border-bottom: 1px solid #eee; padding-bottom: 6px; }
+    .preview-card-title .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: bold; white-space: nowrap; }
+    .badge.cv { background: #e8f5e9; color: #2e7d32; }
+    .badge.ai { background: #e3f2fd; color: #1565c0; }
+    .badge.err { background: #ffebee; color: #c62828; }
+
+    .preview-box { flex: 1; width: 100%; background: #fff; padding: 6px; border-radius: 6px; border: 1px solid #e9ecef; display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; }
+    .preview-sub-title { font-weight: bold; margin-bottom: 6px; color: var(--dark-color); font-size: 12px; }
+    .preview-canvas { max-width: 100%; max-height: 500px; display: block; }
+
+    #processBtn { display: block; width: 100%; background-color: var(--success-color); color: white; border: none; padding: 12px 20px; font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; }
+    #processBtn:disabled { background-color: #adb5bd; cursor: not-allowed; }
+    #processBtn:hover:not(:disabled) { opacity: 0.9; }
+
+    .progress-bar { width: 100%; background-color: #e9ecef; border-radius: 5px; overflow: hidden; margin-top: 15px; display: none; }
+    .progress { width: 0%; height: 18px; background-color: var(--primary-color); transition: 0.2s; }
+    .status { margin-top: 15px; font-weight: bold; text-align: center; color: #495057; min-height: 1.4em; }
+
+    #loadingOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 1500; font-size: 20px; font-weight: bold; color: var(--dark-color); }
+</style>
+
+<script src="./jszip.min.js"></script>
+
+<script>
+    var isCvReady = false;
+    var morphKernel = null;
+    var Module = {
+        onRuntimeInitialized: function () {
+            isCvReady = true;
+            try { morphKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)); } catch (e) { console.error(e); }
+            var lo = document.getElementById('loadingOverlay');
+            if (lo) lo.style.display = 'none';
+            (window._cvWaiters || []).forEach(function (r) { r(); });
+            window._cvWaiters = [];
+            if (window._onCvReady) window._onCvReady();
+        }
+    };
+    // opencv.js 載入失敗時：解除全螢幕遮罩，讓 AI 模式仍可使用
+    window._cvLoadFailed = function () {
+        window._cvFailed = true;
+        var lo = document.getElementById('loadingOverlay');
+        if (lo) lo.style.display = 'none';
+        var err = new Error('OpenCV 載入失敗');
+        (window._cvWaiters || []).forEach(function (r) { r(err); });
+        window._cvWaiters = [];
+        if (window._onCvFailed) window._onCvFailed();
+    };
+</script>
+<script async src="./opencv.js" onerror="_cvLoadFailed()"></script>
+</head>
+<body>
+
+<div id="loadingOverlay"><div>正在載入引擎，請稍候...</div></div>
+
+<div class="container">
+    <h1>Auto Crop 20.0 (Hybrid)</h1>
+
+    <label class="upload-area" id="uploadArea" for="fileInput">
+        <div class="upload-area-icon">📁</div>
+        <div id="uploadText">點擊選擇多張圖片，或將圖片拖拽至此</div>
+    </label>
+    <input type="file" id="fileInput" accept="image/*" multiple>
+
+    <div class="controls-grid">
+        <div class="control-group">
+            <label for="selDetectMode">檢測方式：</label>
+            <select id="selDetectMode">
+                <option value="auto" selected>🤖 自動</option>
+                <option value="cv">⚡ 傳統（純色背景）</option>
+                <option value="ai">🧠 AI（複雜背景）</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label for="selOrientation">方向：</label>
+            <select id="selOrientation">
+                <option value="auto" selected>🔄 自動</option>
+                <option value="portrait">📱 垂直</option>
+                <option value="landscape">💻 水平</option>
+            </select>
+        </div>
+
+        <div class="control-group cv-only">
+            <label for="selBgMode">背景：</label>
+            <select id="selBgMode">
+                <option value="auto" selected>🔄 自動</option>
+                <option value="light">⬜ 淺色 (白底)</option>
+                <option value="dark">⬛ 深色 (黑底)</option>
+            </select>
+        </div>
+
+        <div class="control-group cv-only">
+            <label for="bgThresh">去背景閾值 <span id="valThresh">250</span></label>
+            <input type="range" id="bgThresh" min="50" max="250" value="250">
+        </div>
+
+        <div class="control-group cv-only">
+            <label for="minArea">最小面積 (px²) <span id="valMinArea">5000</span></label>
+            <input type="range" id="minArea" min="500" max="30000" step="500" value="5000">
+        </div>
+
+        <div class="control-group">
+            <label for="maxObjects">最多選取數 <span id="valMaxObjects">1</span></label>
+            <input type="range" id="maxObjects" min="1" max="5" value="1">
+        </div>
+
+        <div class="control-group">
+            <label for="cropPadding">留白 Padding (px) <span id="valPadding">5</span></label>
+            <input type="range" id="cropPadding" min="0" max="100" value="5">
+        </div>
+
+        <div class="checkbox-group">
+            <label style="color: #27ae60;"><input type="checkbox" id="chkUniformCrop"> 統一裁切尺寸</label>
+        </div>
+    </div>
+
+    <div class="preview-section" id="previewSection" style="display: none;">
+        <div class="preview-header">
+            <span>🔍 預覽 (<span id="previewCountText">0</span> 張圖片)
+            </span>
+            <span id="maxSizeNotice" style="font-size: 13px; color: #e67e22; font-weight: bold;"></span>
+        </div>
+        <div class="preview-list" id="previewList"></div>
+    </div>
+
+    <button id="processBtn" disabled>開始下載</button>
+
+    <div class="progress-bar" id="progressBarContainer">
+        <div class="progress" id="progressBar"></div>
+    </div>
+    <div class="status" id="statusText">請選擇圖片。</div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    // ===================== 常數 =====================
+    const MODEL_PATH = './models/best.onnx'; // 請確保此路徑指向你匯出的 OBB ONNX 檔案
+    const YOLO_MODULE_URL = 'https://esm.sh/@ultralytics/yolo';
+    const CONF_THRESHOLD = 0.50;
+    const DETECT_MAX_DIM = 800;
+    const MAX_CANVAS_DIM = 4096;
+    const BG_ANALYZE_SIZE = 128;
+    const BG_BORDER_RATIO = 0.05;
+    const BG_UNIFORM_STD = 25;
+    const BG_UNIFORM_FRAC = 0.85;
+
+    const yieldToMain = () => new Promise(r => setTimeout(r, 0));
+
+    // ===================== DOM =====================
+    const $ = id => document.getElementById(id);
+    const DOM = {
+        fileInput: $('fileInput'), uploadArea: $('uploadArea'), uploadText: $('uploadText'),
+        processBtn: $('processBtn'),
+        previewSection: $('previewSection'), previewList: $('previewList'), previewCountText: $('previewCountText'),
+        selDetectMode: $('selDetectMode'), selOrientation: $('selOrientation'), selBgMode: $('selBgMode'),
+        bgThresh: $('bgThresh'), minArea: $('minArea'), maxObjects: $('maxObjects'),
+        cropPadding: $('cropPadding'), chkUniformCrop: $('chkUniformCrop'),
+        valThresh: $('valThresh'), valMinArea: $('valMinArea'), valMaxObjects: $('valMaxObjects'), valPadding: $('valPadding'),
+        maxSizeNotice: $('maxSizeNotice'), statusText: $('statusText'),
+        progressBarContainer: $('progressBarContainer'), progressBar: $('progressBar')
+    };
+    const DEFAULT_UPLOAD_TEXT = DOM.uploadText.textContent;
+
+    // ===================== State =====================
+    const state = {
+        files: [],
+        thumbnails: [],   // { thumbBitmap, scale, origW, origH, bg: {uniform, mode, std}, aiBoxes } | null
+        detections: [],   // { method: 'cv'|'ai', bgMode, rects: [], error } | { method:'none'|'error', rects:[], error }
+        lastDetection: {},  // 用於判斷是否需要重跑
+        previewCanvases: [],
+        maxCropSize: { maxW: 0, maxH: 0 },
+        isUniform: false
+    };
+
+    const exportCache = new Map();
+    let exportEpoch = 0;   // 匯出快取每失效一次就 +1，讓已開啟的新視窗知道清單過期
+
+    let generation = 0;
+    let refreshSeq = 0;
+    let debounceTimer = null;
+
+    const isPngFile = f => f.type === 'image/png' || /\.png$/i.test(f.name);
+
+    // ===================== 引擎就緒 =====================
+    function ensureCvReady() {
+        if (isCvReady) return Promise.resolve();
+        if (window._cvFailed) return Promise.reject(new Error('OpenCV 載入失敗'));
+        DOM.statusText.textContent = '等待 OpenCV 引擎載入...';
+        return new Promise((resolve, reject) => {
+            (window._cvWaiters = window._cvWaiters || []).push(err => err ? reject(err) : resolve());
+        });
+    }
+
+    // ===================== YOLO =====================
+    let modelPromise = null;
+    function loadModel() {
+        modelPromise ??= import(YOLO_MODULE_URL)
+            .then(({ YOLO }) => YOLO.load(MODEL_PATH))
+            .catch(err => { modelPromise = null; throw err; });
+        return modelPromise;
+    }
+
+    const toArray = v =>
+        v == null ? null
+        : Array.isArray(v) ? v
+        : typeof v.length === 'number' ? Array.from(v)
+        : v.data ? Array.from(v.data)
+        : null;
+
+    function normalizeBoxes(results) {
+        const boxes = Array.isArray(results) ? results[0]?.boxes : results?.boxes;
+        if (!boxes) return [];
+        
+        return Array.from(boxes).map(b => {
+            // 1. 嘗試解析 OBB 輸出 (xywhr)
+            let xywhr = toArray(b.xywhr);
+            // 處理某些套件包裝的陣列結構
+            if (xywhr?.length === 1 && xywhr[0] != null && typeof xywhr[0] !== 'number') {
+                xywhr = toArray(xywhr[0]) || xywhr;
+            }
+            
+            if (xywhr && xywhr.length >= 5) {
+                const [cx, cy, w, h, r] = xywhr.map(Number);
+                if ([cx, cy, w, h, r].every(Number.isFinite) && w > 0 && h > 0) {
+                    return { cx, cy, w, h, angle: r, isOBB: true };
+                }
+            }
+
+            // 2. 退回解析正矩形 (xyxy)
+            let xyxy = toArray(b.xyxy);
+            if (xyxy?.length === 1 && xyxy[0] != null && typeof xyxy[0] !== 'number') {
+                xyxy = toArray(xyxy[0]) || xyxy;
+            }
+            const [x1, y1, x2, y2] = (xyxy || [b.x1, b.y1, b.x2, b.y2]).map(Number);
+            
+            return { 
+                cx: (x1 + x2) / 2, 
+                cy: (y1 + y2) / 2, 
+                w: x2 - x1, 
+                h: y2 - y1, 
+                angle: 0,
+                isOBB: false
+            };
+        }).filter(r => r.w > 0 && r.h > 0);
+    }
+
+    let aiQueue = Promise.resolve();
+    function detectBoxes(canvas) {
+        const task = aiQueue.then(async () => {
+            const model = await loadModel();
+            return normalizeBoxes(await model.predict(canvas, { conf: CONF_THRESHOLD }));
+        });
+        aiQueue = task.catch(() => {});
+        return task;
+    }
+
+    // ===================== 縮圖 + 背景分析 =====================
+    const scratch = document.createElement('canvas');
+    const scratchCtx = scratch.getContext('2d', { willReadFrequently: true });
+    function drawToScratch(bitmap, w = bitmap.width, h = bitmap.height) {
+        scratch.width = w;
+        scratch.height = h;
+        scratchCtx.drawImage(bitmap, 0, 0, w, h);
+        return scratch;
+    }
+
+    async function createDetectionThumbnail(file) {
+        const origBitmap = await createImageBitmap(file);
+        const origW = origBitmap.width, origH = origBitmap.height;
+        const scale = Math.min(1, DETECT_MAX_DIM / Math.max(origW, origH));
+        let thumbBitmap = origBitmap;
+        if (scale < 1) {
+            try {
+                thumbBitmap = await createImageBitmap(origBitmap, {
+                    resizeWidth: Math.max(1, Math.round(origW * scale)),
+                    resizeHeight: Math.max(1, Math.round(origH * scale)),
+                    resizeQuality: 'medium'
+                });
+            } finally {
+                origBitmap.close();
+            }
+        }
+        try {
+            const bg = analyzeThumbBackground(thumbBitmap);
+            return { thumbBitmap, scale, origW, origH, bg, aiBoxes: null };
+        } catch (err) {
+            thumbBitmap.close();
+            throw err;
+        }
+    }
+
+    function analyzeThumbBackground(thumbBitmap) {
+        const s = Math.min(1, BG_ANALYZE_SIZE / Math.max(thumbBitmap.width, thumbBitmap.height));
+        const c = drawToScratch(
+            thumbBitmap,
+            Math.max(1, Math.round(thumbBitmap.width * s)),
+            Math.max(1, Math.round(thumbBitmap.height * s))
+        );
+        const data = scratchCtx.getImageData(0, 0, c.width, c.height).data;
+
+        const border = Math.max(2, Math.round(Math.min(c.width, c.height) * BG_BORDER_RATIO));
+        let sum = 0, sumSq = 0, darkCount = 0, lightCount = 0, n = 0;
+        for (let y = 0; y < c.height; y++) {
+            const yEdge = y < border || y >= c.height - border;
+            for (let x = 0; x < c.width; x++) {
+                const xEdge = x < border || x >= c.width - border;
+                if (!xEdge && !yEdge) continue;
+                const i = (y * c.width + x) * 4;
+                const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                sum += gray; sumSq += gray * gray; n++;
+                if (gray < 30) darkCount++;
+                if (gray > 225) lightCount++;
+            }
+        }
+        if (n === 0) return { uniform: false, mode: 'light', std: 255 };
+        const mean = sum / n;
+        const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+        const darkFrac = darkCount / n;
+        const lightFrac = lightCount / n;
+        const uniform = std < BG_UNIFORM_STD && Math.max(darkFrac, lightFrac) > BG_UNIFORM_FRAC;
+        const mode = darkFrac >= lightFrac ? 'dark' : 'light';
+        return { uniform, mode, std: Math.round(std) };
+    }
+
+    // ===================== OpenCV 檢測 =====================
+    function createCleanBinaryMat(src, bgThresh, bgMode) {
+        const binary = new cv.Mat();
+        let gray = null;
+        let useAlpha = false;
+        try {
+            if (src.channels() === 4) {
+                const planes = new cv.MatVector();
+                cv.split(src, planes);
+                const alpha = planes.get(3);
+                cv.threshold(alpha, binary, 10, 255, cv.THRESH_BINARY);
+                alpha.delete();
+                planes.delete();
+                if (cv.countNonZero(binary) < src.cols * src.rows * 0.99) useAlpha = true;
+            }
+            if (!useAlpha) {
+                gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                const type = bgMode === 'dark' ? cv.THRESH_BINARY : cv.THRESH_BINARY_INV;
+                cv.threshold(gray, binary, bgThresh, 255, type);
+            }
+            if (morphKernel) cv.morphologyEx(binary, binary, cv.MORPH_CLOSE, morphKernel);
+            return binary;
+        } catch (err) {
+            if (binary) binary.delete();
+            throw err;
+        } finally {
+            if (gray) gray.delete();
+        }
+    }
+
+    function getAllRotatedRectsFromThumb(thumb, params) {
+        let src = null, binary = null, contours = null, hierarchy = null;
+        const candidates = [];
+        try {
+            src = cv.imread(drawToScratch(thumb.thumbBitmap));
+            const scale = thumb.scale;
+            binary = createCleanBinaryMat(src, params.bgThresh, params.bgMode);
+            contours = new cv.MatVector();
+            hierarchy = new cv.Mat();
+            cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            const minAreaPx = params.minArea * scale * scale;
+            for (let k = 0; k < contours.size(); k++) {
+                const cnt = contours.get(k);
+                try {
+                    if (cnt.rows < 3) continue;
+                    const area = cv.contourArea(cnt);
+                    if (area <= minAreaPx) continue;
+                    const rect = cv.minAreaRect(cnt);
+                    candidates.push({
+                        area,
+                        rect: {
+                            center: { x: rect.center.x / scale, y: rect.center.y / scale },
+                            size: { width: rect.size.width / scale, height: rect.size.height / scale },
+                            angle: rect.angle
+                        }
+                    });
+                } finally { cnt.delete(); }
+            }
+            candidates.sort((a, b) => b.area - a.area);
+            return candidates.slice(0, params.maxObjects).map(c => c.rect);
+        } catch (err) {
+            console.error('OpenCV 檢測失敗：', err);
+            return [];
+        } finally {
+            if (src) src.delete();
+            if (binary) binary.delete();
+            if (contours) contours.delete();
+            if (hierarchy) hierarchy.delete();
+        }
+    }
+
+    async function detectWithCV(thumb, params) {
+        await ensureCvReady();
+        const bgMode = params.bgMode === 'auto' ? (thumb.bg?.mode || 'light') : params.bgMode;
+        return getAllRotatedRectsFromThumb(thumb, { ...params, bgMode });
+    }
+
+    // ===================== AI 檢測 =====================
+    function getAiBoxes(thumb) {
+        if (!thumb.aiBoxes) {
+            const c = document.createElement('canvas');
+            c.width = thumb.thumbBitmap.width;
+            c.height = thumb.thumbBitmap.height;
+            c.getContext('2d').drawImage(thumb.thumbBitmap, 0, 0);
+            thumb.aiBoxes = detectBoxes(c).catch(err => { thumb.aiBoxes = null; throw err; });
+        }
+        return thumb.aiBoxes;
+    }
+
+    async function detectWithAI(thumb, params) {
+        const boxes = [...await getAiBoxes(thumb)];
+        if (!boxes.length) return [];
+        
+        const area = b => b.w * b.h;
+        boxes.sort((a, b) => area(b) - area(a));
+        
+        return boxes.slice(0, params.maxObjects).map(b => {
+            // YOLOv8-OBB 輸出的角度為弧度 (radians)，轉換為度數 (degrees)
+            // 根據模型定義，正向角度代表順時針旋轉
+            let angleDeg = b.angle * (180 / Math.PI);
+            
+            return {
+                center: {
+                    x: b.cx / thumb.scale,
+                    y: b.cy / thumb.scale
+                },
+                size: {
+                    width: b.w / thumb.scale,
+                    height: b.h / thumb.scale
+                },
+                angle: angleDeg 
+            };
+        });
+    }
+
+    // ===================== 幾何工具 =====================
+    function calculateTargetAngleAndSize(rect, orientationMode) {
+        let angle = rect.angle;
+        let w = rect.size.width;
+        let h = rect.size.height;
+        if (angle < -45) { angle += 90; [w, h] = [h, w]; }
+        else if (angle > 45) { angle -= 90; [w, h] = [h, w]; }
+        if (orientationMode === 'portrait' && w > h) { [w, h] = [h, w]; angle += 90; }
+        else if (orientationMode === 'landscape' && w < h) { [w, h] = [h, w]; angle -= 90; }
+        return { angle, width: w, height: h };
+    }
+
+    // ===================== 檢測調度 =====================
+    function getParams() {
+        return {
+            detectMode: DOM.selDetectMode.value,
+            orientation: DOM.selOrientation.value,
+            bgMode: DOM.selBgMode.value,
+            bgThresh: parseFloat(DOM.bgThresh.value),
+            minArea: parseFloat(DOM.minArea.value),
+            maxObjects: parseInt(DOM.maxObjects.value, 10),
+            padding: parseInt(DOM.cropPadding.value, 10),
+            doUniformCrop: DOM.chkUniformCrop.checked
+        };
+    }
+
+    function detectionNeedsRedetect(params) {
+        const last = state.lastDetection;
+        return (
+            state.detections.length !== state.thumbnails.length ||
+            last.detectMode !== params.detectMode ||
+            last.bgMode !== params.bgMode ||
+            last.bgThresh !== params.bgThresh ||
+            last.minArea !== params.minArea ||
+            last.maxObjects !== params.maxObjects
+        );
+    }
+
+    async function runDetection(params, isStale) {
+        const results = new Array(state.thumbnails.length).fill(null);
+        DOM.progressBarContainer.style.display = 'block';
+        DOM.progressBar.style.width = '0%';
+        try {
+            let done = 0;
+            for (let i = 0; i < state.thumbnails.length; i++) {
+                if (isStale()) return results;
+                const thumb = state.thumbnails[i];
+                if (!thumb) {
+                    results[i] = { method: 'none', rects: [], error: '縮圖失敗' };
+                } else {
+                    try {
+                        let method, rects;
+                        if (params.detectMode === 'ai') {
+                            method = 'ai';
+                            rects = await detectWithAI(thumb, params);
+                        } else if (params.detectMode === 'cv') {
+                            method = 'cv';
+                            rects = await detectWithCV(thumb, params);
+                        } else {
+                            if (thumb.bg.uniform) {
+                                method = 'cv';
+                                rects = await detectWithCV(thumb, params);
+                            } else {
+                                method = 'ai';
+                                rects = await detectWithAI(thumb, params);
+                            }
+                        }
+                        results[i] = {
+                            method,
+                            rects: rects || [],
+                            bgMode: method === 'cv' ? (params.bgMode === 'auto' ? thumb.bg.mode : params.bgMode) : null,
+                            error: null
+                        };
+                    } catch (err) {
+                        console.error(`[${i}] 檢測失敗：`, err);
+                        results[i] = { method: 'error', rects: [], error: err?.message || '未知錯誤' };
+                    }
+                }
+                done++;
+                DOM.statusText.textContent = `辨識中 ${done}/${state.thumbnails.length}`;
+                DOM.progressBar.style.width = `${Math.round(done / state.thumbnails.length * 100)}%`;
+                await yieldToMain();
+            }
+            return results;
+        } finally {
+            if (!isStale()) DOM.progressBarContainer.style.display = 'none';
+        }
+    }
+
+    // ===================== 預覽 =====================
+    function renderPreview(thumb, canvas, params, maxSize, rects, isUniform) {
+        if (!canvas || !thumb?.thumbBitmap) return;
+        canvas.width = thumb.thumbBitmap.width;
+        canvas.height = thumb.thumbBitmap.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(thumb.thumbBitmap, 0, 0);
+        if (!rects || rects.length === 0) return;
+
+        const scale = thumb.scale;
+        ctx.lineWidth = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) / 150));
+        ctx.strokeStyle = '#e74c3c';
+
+        for (const rect of rects) {
+            const { angle, width, height } = calculateTargetAngleAndSize(rect, params.orientation);
+            const rad = angle * Math.PI / 180;
+            const cos = Math.cos(rad), sin = Math.sin(rad);
+            const w = (isUniform ? maxSize.maxW / 2 : (width / 2 + params.padding)) * scale;
+            const h = (isUniform ? maxSize.maxH / 2 : (height / 2 + params.padding)) * scale;
+            const cx = rect.center.x * scale;
+            const cy = rect.center.y * scale;
+            const pts = [
+                { x: cx - w * cos + h * sin, y: cy - w * sin - h * cos },
+                { x: cx + w * cos + h * sin, y: cy + w * sin - h * cos },
+                { x: cx + w * cos - h * sin, y: cy + w * sin + h * cos },
+                { x: cx - w * cos - h * sin, y: cy - w * sin + h * cos }
+            ];
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let k = 1; k < 4; k++) ctx.lineTo(pts[k].x, pts[k].y);
+            ctx.closePath();
+            ctx.stroke();
+        }
+    }
+
+    async function updateAllPreviews(isStale) {
+        if (state.thumbnails.length === 0) return;
+        const params = getParams();
+
+        if (detectionNeedsRedetect(params)) {
+            const results = await runDetection(params, isStale);
+            if (isStale()) return;
+            state.detections = results;
+            state.lastDetection = {
+                detectMode: params.detectMode,
+                bgMode: params.bgMode,
+                bgThresh: params.bgThresh,
+                minArea: params.minArea,
+                maxObjects: params.maxObjects
+            };
+        }
+
+        let maxW = 0, maxH = 0;
+        for (const det of state.detections) {
+            if (!det || !det.rects) continue;
+            for (const rect of det.rects) {
+                const { width, height } = calculateTargetAngleAndSize(rect, params.orientation);
+                maxW = Math.max(maxW, width + params.padding * 2);
+                maxH = Math.max(maxH, height + params.padding * 2);
+            }
+        }
+        state.maxCropSize = maxW > 0
+            ? { maxW: Math.max(1, Math.round(maxW)), maxH: Math.max(1, Math.round(maxH)) }
+            : { maxW: 0, maxH: 0 };
+        state.isUniform = params.doUniformCrop && state.maxCropSize.maxW > 0 && state.maxCropSize.maxH > 0;
+        DOM.maxSizeNotice.textContent = state.isUniform
+            ? `📐 統一尺寸預估: ${state.maxCropSize.maxW} × ${state.maxCropSize.maxH} px`
+            : '';
+
+        for (let i = 0; i < state.thumbnails.length; i++) {
+            if (isStale()) return;
+            const thumb = state.thumbnails[i];
+            if (!thumb) continue;
+            const det = state.detections[i];
+            renderPreview(thumb, state.previewCanvases[i], params, state.maxCropSize, det?.rects || [], state.isUniform);
+            if (i > 0 && i % 5 === 0) await yieldToMain();
+        }
+        updateBadges();
+    }
+
+    function getMethodBadge(det, thumb) {
+        if (!det) return '';
+        if (det.method === 'cv') {
+            const bgText = det.bgMode === 'dark' ? '黑底' : '白底';
+            return `<span class="badge cv">OpenCV · ${bgText}</span>`;
+        }
+        if (det.method === 'ai') return `<span class="badge ai">AI (OBB)</span>`;
+        if (det.method === 'none') return `<span class="badge err">縮圖失敗</span>`;
+        return `<span class="badge err" title="${escapeHtml(det.error || '')}">失敗</span>`;
+    }
+
+    function updateBadges() {
+        const cards = DOM.previewList.querySelectorAll('.preview-card');
+        cards.forEach(card => {
+            const i = Number(card.dataset.fileIndex);
+            const slot = card.querySelector('.badge-slot');
+            if (slot) slot.innerHTML = getMethodBadge(state.detections[i], state.thumbnails[i]);
+        });
+    }
+
+    function reportDetectionSummary() {
+        let ok = 0, okRects = 0, miss = 0, fail = 0;
+        for (const det of state.detections) {
+            if (!det || det.method === 'error' || det.method === 'none') { fail++; continue; }
+            if (!det.rects || det.rects.length === 0) { miss++; continue; }
+            ok++;
+            okRects += det.rects.length;
+        }
+        const parts = [`已就緒！成功 ${ok} 張（${okRects} 個目標）`];
+        if (miss > 0) parts.push(`未偵測 ${miss}`);
+        if (fail > 0) parts.push(`失敗 ${fail}`);
+        DOM.statusText.textContent = parts.join('，');
+    }
+
+    async function refresh() {
+        if (state.files.length === 0) {
+            DOM.statusText.textContent = '請選擇圖片。';
+            return;
+        }
+        const gen = generation, seq = ++refreshSeq;
+        const stale = () => gen !== generation || seq !== refreshSeq;
+        try {
+            await updateAllPreviews(stale);
+            if (stale()) return;
+            reportDetectionSummary();
+            DOM.processBtn.disabled = false;
+        } catch (err) {
+            if (stale()) return;
+            console.error('預覽更新失敗：', err);
+            DOM.statusText.textContent = '❌ 預覽更新失敗：' + (err?.message || '未知錯誤');
+            DOM.processBtn.disabled = true;
+        }
+    }
+
+    function scheduleUpdate() {
+        clearTimeout(debounceTimer);
+        refreshSeq++;
+        clearExportCache();
+        DOM.statusText.textContent = '請稍候...';
+        DOM.processBtn.disabled = true;
+        debounceTimer = setTimeout(refresh, 300);
+    }
+
+    window._onCvReady = () => {
+        if (state.files.length > 0 && state.thumbnails.length > 0) refresh();
+    };
+    window._onCvFailed = () => {
+        DOM.statusText.textContent = '⚠️ OpenCV 載入失敗，純色背景模式無法使用（AI 模式仍可使用）。';
+    };
+
+    // ===================== 事件綁定 =====================
+    function bindRange(input, label) {
+        input.addEventListener('input', () => { label.textContent = input.value; scheduleUpdate(); });
+    }
+    bindRange(DOM.bgThresh, DOM.valThresh);
+    bindRange(DOM.minArea, DOM.valMinArea);
+    bindRange(DOM.maxObjects, DOM.valMaxObjects);
+    bindRange(DOM.cropPadding, DOM.valPadding);
+
+    [DOM.selOrientation, DOM.selBgMode, DOM.chkUniformCrop].forEach(el => el.addEventListener('change', scheduleUpdate));
+
+    DOM.selDetectMode.addEventListener('change', () => {
+        updateControlsAvailability();
+        scheduleUpdate();
+    });
+
+    function updateControlsAvailability() {
+        const aiOnly = DOM.selDetectMode.value === 'ai';
+        document.querySelectorAll('.cv-only').forEach(el => el.classList.toggle('disabled', aiOnly));
+    }
+    updateControlsAvailability();
+
+    // ===================== 上傳 =====================
+    DOM.uploadArea.addEventListener('dragover', e => { e.preventDefault(); DOM.uploadArea.classList.add('dragover'); });
+    DOM.uploadArea.addEventListener('dragleave', () => DOM.uploadArea.classList.remove('dragover'));
+    DOM.uploadArea.addEventListener('drop', e => {
+        e.preventDefault();
+        DOM.uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) handleFilesSelect(Array.from(e.dataTransfer.files));
+    });
+    DOM.fileInput.addEventListener('change', e => {
+        if (e.target.files.length > 0) handleFilesSelect(Array.from(e.target.files));
+        e.target.value = '';
+    });
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function resetState() {
+        generation++;
+        clearExportCache();
+        state.thumbnails.forEach(t => t && t.thumbBitmap.close());
+        Object.assign(state, {
+            files: [], thumbnails: [], detections: [], lastDetection: {},
+            previewCanvases: [], maxCropSize: { maxW: 0, maxH: 0 }, isUniform: false
+        });
+    }
+
+    function resetUploadUI() {
+        DOM.uploadText.textContent = DEFAULT_UPLOAD_TEXT;
+        DOM.processBtn.disabled = true;
+        DOM.previewSection.style.display = 'none';
+        DOM.previewList.innerHTML = '';
+        DOM.progressBarContainer.style.display = 'none';
+        resetState();
+    }
+
+    async function mapWithConcurrency(items, limit, fn) {
+        const results = new Array(items.length);
+        let cursor = 0;
+        const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+            while (cursor < items.length) {
+                const i = cursor++;
+                try { results[i] = await fn(items[i], i); }
+                catch (err) { console.error(`項目 ${i} 失敗:`, err); results[i] = null; }
+            }
+        });
+        await Promise.all(workers);
+        return results;
+    }
+
+    async function handleFilesSelect(files) {
+        const validFiles = files.filter(f => f.type.startsWith('image/'));
+        if (validFiles.length === 0) { resetUploadUI(); return; }
+
+        resetState();
+        const gen = generation;
+        if (DOM.selDetectMode.value !== 'cv') loadModel().catch(() => {});
+        state.files = validFiles;
+        DOM.uploadText.textContent = `已選擇 ${state.files.length} 張圖片`;
+        DOM.processBtn.disabled = true;
+        DOM.previewCountText.textContent = state.files.length;
+        DOM.statusText.textContent = '正在生成縮圖預覽...';
+
+        DOM.previewList.innerHTML = state.files.map((file, i) => {
+            const safeName = escapeHtml(file.name);
+            return `
+                <div class="preview-card" data-file-index="${i}" title="雙擊在新視窗查看">
+                    <div class="preview-card-title">
+                        <span class="name" title="${safeName}">📄 [${i + 1}/${state.files.length}] ${safeName}</span>
+                        <span class="badge-slot"></span>
+                    </div>
+                    <div class="preview-box">
+                        <div class="preview-sub-title">輸出範圍</div>
+                        <canvas class="preview-canvas"></canvas>
+                    </div>
+                </div>`;
+        }).join('');
+        state.previewCanvases = Array.from(DOM.previewList.querySelectorAll('.preview-canvas'));
+        DOM.previewSection.style.display = 'block';
+
+        const thumbs = await mapWithConcurrency(validFiles, 3, createDetectionThumbnail);
+        if (gen !== generation) { thumbs.forEach(t => t && t.thumbBitmap.close()); return; }
+        state.thumbnails = thumbs;
+
+        await refresh();
+    }
+
+    // ===================== 匯出 =====================
+    function clearExportCache() {
+        for (const p of exportCache.values()) {
+            p.then(r => URL.revokeObjectURL(r.url)).catch(() => {});
+        }
+        exportCache.clear();
+        exportEpoch++;
+    }
+
+    function getExportSnapshot() {
+        const p = getParams();
+        return {
+            padding: p.padding,
+            orientation: p.orientation,
+            isUniform: state.isUniform,
+            maxCropSize: { ...state.maxCropSize }
+        };
+    }
+
+    function renderCropToCanvas(bitmap, rect, snap, isPNG) {
+        const { angle, width, height } = calculateTargetAngleAndSize(rect, snap.orientation);
+        const targetW = Math.max(1, snap.isUniform ? snap.maxCropSize.maxW : Math.round(width) + snap.padding * 2);
+        const targetH = Math.max(1, snap.isUniform ? snap.maxCropSize.maxH : Math.round(height) + snap.padding * 2);
+        const s = Math.min(1, MAX_CANVAS_DIM / Math.max(targetW, targetH));
+        const outW = Math.max(1, Math.round(targetW * s));
+        const outH = Math.max(1, Math.round(targetH * s));
+
+        const out = document.createElement('canvas');
+        out.width = outW;
+        out.height = outH;
+        const ctx = out.getContext('2d');
+        if (!isPNG) {
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, outW, outH);
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.scale(outW / targetW, outH / targetH);
+        ctx.translate(targetW / 2, targetH / 2);
+        
+        // 此處的 -angle 是為了配合 Canvas 旋轉方向 (順時針)
+        ctx.rotate(-angle * Math.PI / 180);
+        
+        ctx.translate(-rect.center.x, -rect.center.y);
+        ctx.drawImage(bitmap, 0, 0);
+        return out;
+    }
+
+    function getExportResult(fileIndex, subIndex, sharedBitmap = null) {
+        const snap = getExportSnapshot();
+        const key = [
+            fileIndex, subIndex, snap.padding, snap.orientation,
+            snap.isUniform ? 1 : 0, snap.maxCropSize.maxW, snap.maxCropSize.maxH
+        ].join('|');
+        if (exportCache.has(key)) return exportCache.get(key);
+
+        const task = (async () => {
+            const file = state.files[fileIndex];
+            const rect = state.detections[fileIndex]?.rects?.[subIndex];
+            if (!rect) throw new Error('找不到裁切範圍');
+            const isPNG = isPngFile(file);
+            const mime = isPNG ? 'image/png' : 'image/jpeg';
+
+            const bitmap = sharedBitmap || await createImageBitmap(file);
+            try {
+                const out = renderCropToCanvas(bitmap, rect, snap, isPNG);
+                const blob = await new Promise(r => out.toBlob(r, mime, 0.92));
+                out.width = out.height = 0;
+                if (!blob) throw new Error('圖片編碼失敗');
+
+                const baseName = file.name.replace(/\.[^/.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
+                const fi = String(fileIndex + 1).padStart(2, '0');
+                const si = String(subIndex + 1).padStart(2, '0');
+                const ext = isPNG ? '.png' : '.jpg';
+                return {
+                    blob, url: URL.createObjectURL(blob), mime,
+                    filename: `${baseName}_${fi}_(${si})${ext}`
+                };
+            } finally {
+                if (!sharedBitmap) bitmap.close();
+            }
+        })();
+
+        exportCache.set(key, task);
+        task.catch(() => exportCache.delete(key));
+        return task;
+    }
+
+    // ===================== 新視窗查看 =====================
+    function buildAllItems() {
+        const items = [];
+        for (let i = 0; i < state.files.length; i++) {
+            const rects = state.detections[i]?.rects;
+            if (!rects) continue;
+            for (let j = 0; j < rects.length; j++) items.push({ fileIndex: i, subIndex: j });
+        }
+        return items;
+    }
+
+    async function rotateBlob(blob, mime, deg) {
+        const bmp = await createImageBitmap(blob);
+        try {
+            const swap = deg === 90 || deg === 270;
+            const c = document.createElement('canvas');
+            c.width = swap ? bmp.height : bmp.width;
+            c.height = swap ? bmp.width : bmp.height;
+            const ctx = c.getContext('2d');
+            ctx.translate(c.width / 2, c.height / 2);
+            ctx.rotate(deg * Math.PI / 180);
+            ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+            const out = await new Promise(r => c.toBlob(r, mime, 0.95));
+            c.width = c.height = 0;
+            if (!out) throw new Error('旋轉失敗');
+            return out;
+        } finally { bmp.close(); }
+    }
+
+    function buildViewerPage(num, total) {
+        return `<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>載入中…</title>
+<style>
+  html, body { margin: 0; background: #121212; color: #fff; font-family: 'Segoe UI', Arial, sans-serif; }
+  #stage { min-height: 100vh; display: flex; }
+  #img { margin: auto; display: block; max-width: 100vw; max-height: 100vh; cursor: zoom-in; }
+  #img.actual { max-width: none; max-height: none; cursor: zoom-out; }
+  #img:not([src]) { display: none; }
+  .pill, .bar button { background: rgba(0,0,0,.6); color: #fff; border: 1px solid rgba(255,255,255,.2); border-radius: 20px; }
+  #count { position: fixed; top: 16px; left: 16px; padding: 8px 16px; font-size: 14px; z-index: 10; pointer-events: none; }
+  .bar { position: fixed; top: 16px; right: 16px; display: flex; gap: 8px; z-index: 10; }
+  .bar button { height: 38px; min-width: 38px; padding: 0 14px; font-size: 16px; line-height: 1; cursor: pointer; transition: background .2s; }
+  .bar button:hover:not(:disabled) { background: rgba(255,255,255,.25); }
+  .bar button:disabled { opacity: .3; cursor: not-allowed; }
+  #msg { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); padding: 8px 16px; font-size: 14px; z-index: 10; pointer-events: none; }
+</style></head><body>
+<div id="stage"><img id="img" alt=""></div>
+<div id="count" class="pill">第 <b id="cur">${num}</b> 張 / 共 <b>${total}</b> 張</div>
+<div class="bar">
+  <button id="prev" title="上一張 (←)">&#10094;</button>
+  <button id="next" title="下一張 (→)">&#10095;</button>
+  <button id="rot" title="旋轉 90° (R)">⟳ 旋轉</button>
+</div>
+<div id="msg" class="pill">正在生成圖片…</div>
+<\/body><\/html>`;
+    }
+
+    function openImageWindow(fileIndex) {
+        if (DOM.processBtn.disabled) return;
+        const det = state.detections[fileIndex];
+        if (!det || !det.rects || det.rects.length === 0) {
+            DOM.statusText.textContent = `⚠️ ${state.files[fileIndex].name} 未偵測到目標。`;
+            return;
+        }
+        const items = buildAllItems();
+        let index = items.findIndex(it => it.fileIndex === fileIndex);
+        if (index < 0) return;
+
+        const win = window.open('', '_blank');
+        if (!win) { alert('請允許彈出視窗以查看圖片！'); return; }
+        const epoch = exportEpoch;
+        win.document.open();
+        win.document.write(buildViewerPage(index + 1, items.length));
+        win.document.close();
+
+        const $w = id => win.document.getElementById(id);
+        const img = $w('img'), msg = $w('msg'), cur = $w('cur');
+        const btnPrev = $w('prev'), btnNext = $w('next'), btnRot = $w('rot');
+        let token = 0, rotation = 0, baseRes = null, rotatedUrl = null;
+
+        function setImage(url, isRotated) {
+            if (rotatedUrl) URL.revokeObjectURL(rotatedUrl);
+            rotatedUrl = isRotated ? url : null;
+            img.src = url;
+            msg.style.display = 'none';
+        }
+
+        function updateNav() {
+            cur.textContent = index + 1;
+            btnPrev.disabled = index <= 0;
+            btnNext.disabled = index >= items.length - 1;
+        }
+
+        function isStale() {
+            if (epoch === exportEpoch) return false;
+            win.alert('主頁的圖片或設定已更改，請回到主頁重新雙擊開啟。');
+            return true;
+        }
+
+        async function show(i) {
+            if (i < 0 || i >= items.length || isStale()) return;
+            const my = ++token;
+            index = i; rotation = 0; baseRes = null;
+            updateNav();
+            img.classList.remove('actual');
+            msg.textContent = '正在生成圖片…';
+            msg.style.display = 'block';
+            try {
+                const res = await getExportResult(items[i].fileIndex, items[i].subIndex);
+                if (my !== token || win.closed) return;
+                baseRes = res;
+                win.document.title = res.filename;
+                setImage(res.url, false);
+            } catch (err) {
+                console.error('生成圖片失敗：', err);
+                if (my === token && !win.closed) msg.textContent = '圖片生成失敗';
+            }
+        }
+
+        async function rotate() {
+            if (!baseRes || isStale()) return;
+            rotation = (rotation + 90) % 360;
+            const my = ++token;
+            try {
+                if (rotation === 0) { setImage(baseRes.url, false); return; }
+                const blob = await rotateBlob(baseRes.blob, baseRes.mime, rotation);
+                if (my !== token || win.closed) return;
+                setImage(URL.createObjectURL(blob), true);
+            } catch (err) { console.error('旋轉失敗：', err); }
+        }
+
+        btnPrev.addEventListener('click', () => show(index - 1));
+        btnNext.addEventListener('click', () => show(index + 1));
+        btnRot.addEventListener('click', rotate);
+
+        img.addEventListener('click', () => {
+            if (!img.classList.toggle('actual')) return;
+            const d = win.document.documentElement;
+            win.scrollTo((d.scrollWidth - win.innerWidth) / 2, (d.scrollHeight - win.innerHeight) / 2);
+        });
+
+        img.addEventListener('dragstart', e => {
+            if (!baseRes) return;
+            try { e.dataTransfer.setData('DownloadURL', `${baseRes.mime}:${baseRes.filename}:${img.src}`); } catch (_) {}
+        });
+
+        win.document.addEventListener('keydown', e => {
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.key === 'ArrowLeft') { e.preventDefault(); show(index - 1); }
+            else if (e.key === 'ArrowRight') { e.preventDefault(); show(index + 1); }
+            else if (e.key === 'r' || e.key === 'R') rotate();
+        });
+
+        win.addEventListener('pagehide', () => { if (rotatedUrl) URL.revokeObjectURL(rotatedUrl); });
+
+        show(index);
+    }
+
+    DOM.previewList.addEventListener('click', e => {
+        const card = e.target.closest('.preview-card');
+        if (card) openImageWindow(Number(card.dataset.fileIndex));
+    });
+
+    // ===================== 打包下載 =====================
+    function setControlsDisabled(disabled) {
+        [DOM.selDetectMode, DOM.selOrientation, DOM.selBgMode, DOM.bgThresh,
+         DOM.minArea, DOM.maxObjects, DOM.cropPadding, DOM.chkUniformCrop]
+            .forEach(el => { el.disabled = disabled; });
+    }
+
+    DOM.processBtn.addEventListener('click', async () => {
+        if (state.files.length === 0) return;
+        if (typeof JSZip === 'undefined') { alert('JSZip 套件未載入成功'); return; }
+
+        DOM.processBtn.disabled = true;
+        setControlsDisabled(true);
+        DOM.progressBarContainer.style.display = 'block';
+        DOM.progressBar.style.width = '0%';
+
+        const zip = new JSZip();
+        const skipped = [];
+
+        try {
+            const total = state.files.length;
+            let finished = 0;
+            for (let i = 0; i < state.files.length; i++) {
+                const file = state.files[i];
+                const det = state.detections[i];
+                if (!det || !det.rects || det.rects.length === 0) {
+                    skipped.push(file.name);
+                } else {
+                    let bitmap = null;
+                    if (det.rects.length > 1) {
+                        try { bitmap = await createImageBitmap(file); } catch (_) { bitmap = null; }
+                    }
+                    try {
+                        for (let j = 0; j < det.rects.length; j++) {
+                            try {
+                                const { blob, filename } = await getExportResult(i, j, bitmap);
+                                zip.file(filename, blob);
+                            } catch (err) {
+                                console.error(`處理 ${file.name} #${j + 1} 失敗:`, err);
+                                skipped.push(`${file.name} #${j + 1}`);
+                            }
+                        }
+                    } finally {
+                        if (bitmap) bitmap.close();
+                    }
+                }
+                finished++;
+                DOM.statusText.textContent = `正在處理 (${finished}/${total})`;
+                DOM.progressBar.style.width = `${Math.round(finished / total * 100)}%`;
+                await yieldToMain();
+            }
+            skipped.sort((a, b) => a.localeCompare(b));
+            if (skipped.length > 0) {
+                zip.file('skipped.txt', ['以下檔案因未偵測到目標或處理失敗而被跳過：', '', ...skipped].join('\n'));
+            }
+
+            const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }, meta => {
+                DOM.progressBar.style.width = `${meta.percent.toFixed(0)}%`;
+                DOM.statusText.textContent = `正在打包壓縮檔... ${meta.percent.toFixed(0)}%`;
+            });
+
+            const url = URL.createObjectURL(zipBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'Processed_Images.zip';
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+            const done = skipped.length > 0
+                ? `✅ 任務完成！（${skipped.length} 項被跳過，詳見 skipped.txt）`
+                : '✅ 任務完成！';
+            DOM.statusText.textContent = done;
+            setTimeout(() => {
+                resetUploadUI();
+                DOM.progressBarContainer.style.display = 'none';
+                DOM.statusText.textContent = `${done} 請選擇新圖片。`;
+            }, 1500);
+        } catch (err) {
+            console.error('打包 ZIP 失敗：', err);
+            DOM.statusText.textContent = '❌ 打包過程發生錯誤。';
+            DOM.progressBarContainer.style.display = 'none';
+            DOM.processBtn.disabled = false;
+        } finally {
+            setControlsDisabled(false);
+        }
+    });
+
+    updateControlsAvailability();
+})();
+</script>
+</body>
+</html>
