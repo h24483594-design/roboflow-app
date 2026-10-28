@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoCrop Hybrid (OBB Supported) — Roboflow Hosted API</title>
+<title>AutoCrop Hybrid (OBB Supported) — Roboflow Proxy</title>
 <style>
     :root { --primary-color: #3498db; --success-color: #2ecc71; --dark-color: #2c3e50; }
     body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
@@ -84,7 +84,7 @@
 <div id="loadingOverlay"><div>正在載入引擎，請稍候...</div></div>
 
 <div class="container">
-    <h1>Auto Crop 20.0 (Hybrid · Roboflow)</h1>
+    <h1>Auto Crop 20.0 (Hybrid · Proxy)</h1>
 
     <label class="upload-area" id="uploadArea" for="fileInput">
         <div class="upload-area-icon">📁</div>
@@ -98,7 +98,7 @@
             <select id="selDetectMode">
                 <option value="auto" selected>🤖 自動</option>
                 <option value="cv">⚡ 傳統（純色背景）</option>
-                <option value="ai">🧠 AI（Roboflow Hosted）</option>
+                <option value="ai">🧠 AI（Roboflow Proxy）</option>
             </select>
         </div>
 
@@ -169,7 +169,9 @@
     // ===================== Roboflow 設定 =====================
     const ROBOFLOW_CONFIG = {
         MODEL_ID: "chunhos-workspace/my-first-project-jcbpb-1-rfdetr-seg-medium-t1",
-        API_KEY: "rf_hisP5klxDgZ5ZD22O7R5l5xU10l1" 
+        API_KEY: "rf_hisP5klxDgZ5ZD22O7R5l5xU10l1",
+        // ⚠️ 請將這裡替換為你在 Cloudflare 生成的 Worker 網址
+        PROXY_URL: "https://weathered-cell-4d8c.h24483594.workers.dev" 
     };
 
     const CONF_THRESHOLD = 0.50;
@@ -227,7 +229,7 @@
         });
     }
 
-    // ===================== Roboflow Hosted API =====================
+    // ===================== Roboflow Proxy API =====================
     async function detectBoxes(canvas) {
         const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
         if (!blob) throw new Error('無法將影像轉換為 Blob');
@@ -235,9 +237,10 @@
         const formData = new FormData();
         formData.append('file', blob, 'image.jpg');
 
-        const { MODEL_ID, API_KEY } = ROBOFLOW_CONFIG;
-        // ⚠️ 修改處：將 detect 替換為 serverless
-        const url = `https://serverless.roboflow.com/${MODEL_ID}?api_key=${API_KEY}&format=json`;
+        const { MODEL_ID, API_KEY, PROXY_URL } = ROBOFLOW_CONFIG;
+        
+        // ⚠️ 修改處：將請求指向你的代理 Worker
+        const url = `${PROXY_URL}/${MODEL_ID}?api_key=${API_KEY}&format=json`;
 
         const response = await fetch(url, {
             method: 'POST',
@@ -246,7 +249,7 @@
 
         if (!response.ok) {
             const text = await response.text().catch(() => '');
-            throw new Error(`Roboflow API 請求失敗 (${response.status}): ${text || response.statusText}`);
+            throw new Error(`代理請求失敗 (${response.status}): ${text || response.statusText}`);
         }
 
         const json = await response.json();
@@ -466,7 +469,7 @@
         return getAllRotatedRectsFromThumb(thumb, { ...params, bgMode });
     }
 
-    // ===================== AI 檢測（已改為 Roboflow） =====================
+    // ===================== AI 檢測（已改為 Roboflow Proxy） =====================
     function getAiBoxes(thumb) {
         if (!thumb.aiBoxes) {
             const c = document.createElement('canvas');
@@ -677,7 +680,7 @@
             const bgText = det.bgMode === 'dark' ? '黑底' : '白底';
             return `<span class="badge cv">OpenCV · ${bgText}</span>`;
         }
-        if (det.method === 'ai') return `<span class="badge ai">Roboflow Serverless</span>`;
+        if (det.method === 'ai') return `<span class="badge ai">Roboflow Proxy</span>`;
         if (det.method === 'none') return `<span class="badge err">縮圖失敗</span>`;
         return `<span class="badge err" title="${escapeHtml(det.error || '')}">失敗</span>`;
     }
