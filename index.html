@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoCrop Hybrid (OBB Supported)</title>
+<title>AutoCrop Hybrid (OBB Supported) — Roboflow Hosted API</title>
 <style>
     :root { --primary-color: #3498db; --success-color: #2ecc71; --dark-color: #2c3e50; }
     body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #f4f7f6; color: #333; margin: 0; padding: 20px; }
@@ -67,7 +67,6 @@
             if (window._onCvReady) window._onCvReady();
         }
     };
-    // opencv.js 載入失敗時：解除全螢幕遮罩，讓 AI 模式仍可使用
     window._cvLoadFailed = function () {
         window._cvFailed = true;
         var lo = document.getElementById('loadingOverlay');
@@ -85,7 +84,7 @@
 <div id="loadingOverlay"><div>正在載入引擎，請稍候...</div></div>
 
 <div class="container">
-    <h1>Auto Crop 20.0 (Hybrid)</h1>
+    <h1>Auto Crop 20.0 (Hybrid · Roboflow)</h1>
 
     <label class="upload-area" id="uploadArea" for="fileInput">
         <div class="upload-area-icon">📁</div>
@@ -99,7 +98,7 @@
             <select id="selDetectMode">
                 <option value="auto" selected>🤖 自動</option>
                 <option value="cv">⚡ 傳統（純色背景）</option>
-                <option value="ai">🧠 AI（複雜背景）</option>
+                <option value="ai">🧠 AI（Roboflow Hosted）</option>
             </select>
         </div>
 
@@ -167,9 +166,13 @@
 (function () {
     'use strict';
 
-    // ===================== 常數 =====================
-    const MODEL_PATH = './models/best.onnx'; // 請確保此路徑指向你匯出的 OBB ONNX 檔案
-    const YOLO_MODULE_URL = 'https://esm.sh/@ultralytics/yolo';
+    // ===================== Roboflow 設定 =====================
+    // ⚠️ 請替換為你自己的 Roboflow 模型 ID 與 Publishable Key
+    const ROBOFLOW_CONFIG = {
+        MODEL_ID: "YOUR_WORKSPACE/YOUR_MODEL_SLUG",   // 例如 "my-workspace/autocrop-obb/1"
+        API_KEY: "YOUR_ROBOFLOW_PUBLISHABLE_KEY"       // 以 rf_ 開頭的可發布密鑰
+    };
+
     const CONF_THRESHOLD = 0.50;
     const DETECT_MAX_DIM = 800;
     const MAX_CANVAS_DIM = 4096;
@@ -198,16 +201,16 @@
     // ===================== State =====================
     const state = {
         files: [],
-        thumbnails: [],   // { thumbBitmap, scale, origW, origH, bg: {uniform, mode, std}, aiBoxes } | null
-        detections: [],   // { method: 'cv'|'ai', bgMode, rects: [], error } | { method:'none'|'error', rects:[], error }
-        lastDetection: {},  // 用於判斷是否需要重跑
+        thumbnails: [],
+        detections: [],
+        lastDetection: {},
         previewCanvases: [],
         maxCropSize: { maxW: 0, maxH: 0 },
         isUniform: false
     };
 
     const exportCache = new Map();
-    let exportEpoch = 0;   // 匯出快取每失效一次就 +1，讓已開啟的新視窗知道清單過期
+    let exportEpoch = 0;
 
     let generation = 0;
     let refreshSeq = 0;
@@ -225,70 +228,100 @@
         });
     }
 
-    // ===================== YOLO =====================
-    let modelPromise = null;
-    function loadModel() {
-        modelPromise ??= import(YOLO_MODULE_URL)
-            .then(({ YOLO }) => YOLO.load(MODEL_PATH))
-            .catch(err => { modelPromise = null; throw err; });
-        return modelPromise;
+    // ===================== Roboflow Hosted API =====================
+    async function detectBoxes(canvas) {
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+        if (!blob) throw new Error('無法將影像轉換為 Blob');
+
+        const formData = new FormData();
+        formData.append('file', blob, 'image.jpg');
+
+        const { MODEL_ID, API_KEY } = ROBOFLOW_CONFIG;
+        const url = `https://detect.roboflow.com/${MODEL_ID}?api_key=${API_KEY}&format=json`;
+
+        const response = await fetch(url, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`Roboflow API 請求失敗 (${response.status}): ${text || response.statusText}`);
+        }
+
+        const json = await response.json();
+        return json.predictions || [];
     }
 
-    const toArray = v =>
-        v == null ? null
-        : Array.isArray(v) ? v
-        : typeof v.length === 'number' ? Array.from(v)
-        : v.data ? Array.from(v.data)
-        : null;
+    // 將 Roboflow 預測陣列正規化為 { cx, cy, w, h, angle, isOBB } 結構（angle 為弧度）
+    function normalizeBoxes(predictions) {
+        if (!Array.isArray(predictions)) return [];
 
-    function normalizeBoxes(results) {
-        const boxes = Array.isArray(results) ? results[0]?.boxes : results?.boxes;
-        if (!boxes) return [];
-        
-        return Array.from(boxes).map(b => {
-            // 1. 嘗試解析 OBB 輸出 (xywhr)
-            let xywhr = toArray(b.xywhr);
-            // 處理某些套件包裝的陣列結構
-            if (xywhr?.length === 1 && xywhr[0] != null && typeof xywhr[0] !== 'number') {
-                xywhr = toArray(xywhr[0]) || xywhr;
-            }
-            
-            if (xywhr && xywhr.length >= 5) {
-                const [cx, cy, w, h, r] = xywhr.map(Number);
-                if ([cx, cy, w, h, r].every(Number.isFinite) && w > 0 && h > 0) {
-                    return { cx, cy, w, h, angle: r, isOBB: true };
+        return predictions.map(p => {
+            // 情況 A：Roboflow 返回 points 陣列（四個角點）
+            if (Array.isArray(p.points) && p.points.length === 4) {
+                const [pt1, pt2, pt3] = p.points;
+                const cx = (pt1.x + pt2.x + pt3.x + p.points[3].x) / 4;
+                const cy = (pt1.y + pt2.y + pt3.y + p.points[3].y) / 4;
+                const w = Math.hypot(pt2.x - pt1.x, pt2.y - pt1.y);
+                const h = Math.hypot(pt3.x - pt2.x, pt3.y - pt2.y);
+                // atan2 返回弧度，直接作為 angle 使用
+                const angleRad = Math.atan2(pt2.y - pt1.y, pt2.x - pt1.x);
+                if (w > 0 && h > 0) {
+                    return { cx, cy, w, h, angle: angleRad, isOBB: true };
                 }
             }
 
-            // 2. 退回解析正矩形 (xyxy)
-            let xyxy = toArray(b.xyxy);
-            if (xyxy?.length === 1 && xyxy[0] != null && typeof xyxy[0] !== 'number') {
-                xyxy = toArray(xyxy[0]) || xyxy;
+            // 情況 B：Roboflow 返回 x, y, width, height, angle/rotation
+            if (typeof p.x === 'number' && typeof p.y === 'number' &&
+                typeof p.width === 'number' && typeof p.height === 'number') {
+                const cx = p.x;
+                const cy = p.y;
+                const w = p.width;
+                const h = p.height;
+                let angleRad = 0;
+                if (typeof p.angle === 'number') {
+                    // Roboflow 的 angle 欄位常為「度」，轉為弧度
+                    angleRad = p.angle * (Math.PI / 180);
+                } else if (typeof p.rotation === 'number') {
+                    angleRad = p.rotation;
+                } else if (typeof p.theta === 'number') {
+                    angleRad = p.theta;
+                }
+                if (w > 0 && h > 0) {
+                    return { cx, cy, w, h, angle: angleRad, isOBB: angleRad !== 0 };
+                }
             }
-            const [x1, y1, x2, y2] = (xyxy || [b.x1, b.y1, b.x2, b.y2]).map(Number);
-            
-            return { 
-                cx: (x1 + x2) / 2, 
-                cy: (y1 + y2) / 2, 
-                w: x2 - x1, 
-                h: y2 - y1, 
-                angle: 0,
-                isOBB: false
-            };
-        }).filter(r => r.w > 0 && r.h > 0);
+
+            // 情況 C：標準 xyxy 水平框
+            if (typeof p.x1 === 'number' && typeof p.y1 === 'number' &&
+                typeof p.x2 === 'number' && typeof p.y2 === 'number') {
+                const x1 = p.x1, y1 = p.y1, x2 = p.x2, y2 = p.y2;
+                return {
+                    cx: (x1 + x2) / 2,
+                    cy: (y1 + y2) / 2,
+                    w: x2 - x1,
+                    h: y2 - y1,
+                    angle: 0,
+                    isOBB: false
+                };
+            }
+
+            return null;
+        }).filter(r => r && r.w > 0 && r.h > 0);
     }
 
     let aiQueue = Promise.resolve();
-    function detectBoxes(canvas) {
+    function detectWithRoboflow(canvas) {
         const task = aiQueue.then(async () => {
-            const model = await loadModel();
-            return normalizeBoxes(await model.predict(canvas, { conf: CONF_THRESHOLD }));
+            const predictions = await detectBoxes(canvas);
+            return normalizeBoxes(predictions);
         });
         aiQueue = task.catch(() => {});
         return task;
     }
 
-    // ===================== 縮圖 + 背景分析 =====================
+    // ===================== 縮圖 + 背景分析（不變） =====================
     const scratch = document.createElement('canvas');
     const scratchCtx = scratch.getContext('2d', { willReadFrequently: true });
     function drawToScratch(bitmap, w = bitmap.width, h = bitmap.height) {
@@ -356,7 +389,7 @@
         return { uniform, mode, std: Math.round(std) };
     }
 
-    // ===================== OpenCV 檢測 =====================
+    // ===================== OpenCV 檢測（不變） =====================
     function createCleanBinaryMat(src, bgThresh, bgMode) {
         const binary = new cv.Mat();
         let gray = null;
@@ -435,14 +468,14 @@
         return getAllRotatedRectsFromThumb(thumb, { ...params, bgMode });
     }
 
-    // ===================== AI 檢測 =====================
+    // ===================== AI 檢測（已改為 Roboflow） =====================
     function getAiBoxes(thumb) {
         if (!thumb.aiBoxes) {
             const c = document.createElement('canvas');
             c.width = thumb.thumbBitmap.width;
             c.height = thumb.thumbBitmap.height;
             c.getContext('2d').drawImage(thumb.thumbBitmap, 0, 0);
-            thumb.aiBoxes = detectBoxes(c).catch(err => { thumb.aiBoxes = null; throw err; });
+            thumb.aiBoxes = detectWithRoboflow(c).catch(err => { thumb.aiBoxes = null; throw err; });
         }
         return thumb.aiBoxes;
     }
@@ -450,15 +483,14 @@
     async function detectWithAI(thumb, params) {
         const boxes = [...await getAiBoxes(thumb)];
         if (!boxes.length) return [];
-        
+
         const area = b => b.w * b.h;
         boxes.sort((a, b) => area(b) - area(a));
-        
+
         return boxes.slice(0, params.maxObjects).map(b => {
-            // YOLOv8-OBB 輸出的角度為弧度 (radians)，轉換為度數 (degrees)
-            // 根據模型定義，正向角度代表順時針旋轉
+            // normalizeBoxes 已保證 angle 為弧度，此處轉為度數供既有幾何邏輯使用
             let angleDeg = b.angle * (180 / Math.PI);
-            
+
             return {
                 center: {
                     x: b.cx / thumb.scale,
@@ -468,12 +500,12 @@
                     width: b.w / thumb.scale,
                     height: b.h / thumb.scale
                 },
-                angle: angleDeg 
+                angle: angleDeg
             };
         });
     }
 
-    // ===================== 幾何工具 =====================
+    // ===================== 幾何工具（不變） =====================
     function calculateTargetAngleAndSize(rect, orientationMode) {
         let angle = rect.angle;
         let w = rect.size.width;
@@ -485,7 +517,7 @@
         return { angle, width: w, height: h };
     }
 
-    // ===================== 檢測調度 =====================
+    // ===================== 檢測調度（不變） =====================
     function getParams() {
         return {
             detectMode: DOM.selDetectMode.value,
@@ -562,7 +594,7 @@
         }
     }
 
-    // ===================== 預覽 =====================
+    // ===================== 預覽（不變） =====================
     function renderPreview(thumb, canvas, params, maxSize, rects, isUniform) {
         if (!canvas || !thumb?.thumbBitmap) return;
         canvas.width = thumb.thumbBitmap.width;
@@ -648,7 +680,7 @@
             const bgText = det.bgMode === 'dark' ? '黑底' : '白底';
             return `<span class="badge cv">OpenCV · ${bgText}</span>`;
         }
-        if (det.method === 'ai') return `<span class="badge ai">AI (OBB)</span>`;
+        if (det.method === 'ai') return `<span class="badge ai">Roboflow Hosted</span>`;
         if (det.method === 'none') return `<span class="badge err">縮圖失敗</span>`;
         return `<span class="badge err" title="${escapeHtml(det.error || '')}">失敗</span>`;
     }
@@ -712,7 +744,7 @@
         DOM.statusText.textContent = '⚠️ OpenCV 載入失敗，純色背景模式無法使用（AI 模式仍可使用）。';
     };
 
-    // ===================== 事件綁定 =====================
+    // ===================== 事件綁定（不變） =====================
     function bindRange(input, label) {
         input.addEventListener('input', () => { label.textContent = input.value; scheduleUpdate(); });
     }
@@ -790,7 +822,7 @@
 
         resetState();
         const gen = generation;
-        if (DOM.selDetectMode.value !== 'cv') loadModel().catch(() => {});
+        // ❌ 已移除：if (DOM.selDetectMode.value !== 'cv') loadModel().catch(() => {});
         state.files = validFiles;
         DOM.uploadText.textContent = `已選擇 ${state.files.length} 張圖片`;
         DOM.processBtn.disabled = true;
@@ -821,7 +853,7 @@
         await refresh();
     }
 
-    // ===================== 匯出 =====================
+    // ===================== 匯出（不變） =====================
     function clearExportCache() {
         for (const p of exportCache.values()) {
             p.then(r => URL.revokeObjectURL(r.url)).catch(() => {});
@@ -860,10 +892,7 @@
         ctx.imageSmoothingQuality = 'high';
         ctx.scale(outW / targetW, outH / targetH);
         ctx.translate(targetW / 2, targetH / 2);
-        
-        // 此處的 -angle 是為了配合 Canvas 旋轉方向 (順時針)
         ctx.rotate(-angle * Math.PI / 180);
-        
         ctx.translate(-rect.center.x, -rect.center.y);
         ctx.drawImage(bitmap, 0, 0);
         return out;
@@ -909,7 +938,7 @@
         return task;
     }
 
-    // ===================== 新視窗查看 =====================
+    // ===================== 新視窗查看（不變） =====================
     function buildAllItems() {
         const items = [];
         for (let i = 0; i < state.files.length; i++) {
@@ -1074,7 +1103,7 @@
         if (card) openImageWindow(Number(card.dataset.fileIndex));
     });
 
-    // ===================== 打包下載 =====================
+    // ===================== 打包下載（不變） =====================
     function setControlsDisabled(disabled) {
         [DOM.selDetectMode, DOM.selOrientation, DOM.selBgMode, DOM.bgThresh,
          DOM.minArea, DOM.maxObjects, DOM.cropPadding, DOM.chkUniformCrop]
