@@ -167,10 +167,9 @@
     'use strict';
 
     // ===================== Roboflow 設定 =====================
-    // ⚠️ 請替換為你自己的 Roboflow 模型 ID 與 Publishable Key
     const ROBOFLOW_CONFIG = {
-        MODEL_ID: "chunhos-workspace/my-first-project-jcbpb-1-rfdetr-seg-medium-t1",   // 例如 "my-workspace/autocrop-obb/1"
-        API_KEY: "rf_hisP5klxDgZ5ZD22O7R5l5xU10l1"       // 以 rf_ 開頭的可發布密鑰
+        MODEL_ID: "chunhos-workspace/my-first-project-jcbpb-1-rfdetr-seg-medium-t1",
+        API_KEY: "rf_hisP5klxDgZ5ZD22O7R5l5xU10l1" 
     };
 
     const CONF_THRESHOLD = 0.50;
@@ -237,7 +236,8 @@
         formData.append('file', blob, 'image.jpg');
 
         const { MODEL_ID, API_KEY } = ROBOFLOW_CONFIG;
-        const url = `https://detect.roboflow.com/${MODEL_ID}?api_key=${API_KEY}&format=json`;
+        // ⚠️ 修改處：將 detect 替換為 serverless
+        const url = `https://serverless.roboflow.com/${MODEL_ID}?api_key=${API_KEY}&format=json`;
 
         const response = await fetch(url, {
             method: 'POST',
@@ -265,7 +265,6 @@
                 const cy = (pt1.y + pt2.y + pt3.y + p.points[3].y) / 4;
                 const w = Math.hypot(pt2.x - pt1.x, pt2.y - pt1.y);
                 const h = Math.hypot(pt3.x - pt2.x, pt3.y - pt2.y);
-                // atan2 返回弧度，直接作為 angle 使用
                 const angleRad = Math.atan2(pt2.y - pt1.y, pt2.x - pt1.x);
                 if (w > 0 && h > 0) {
                     return { cx, cy, w, h, angle: angleRad, isOBB: true };
@@ -281,7 +280,6 @@
                 const h = p.height;
                 let angleRad = 0;
                 if (typeof p.angle === 'number') {
-                    // Roboflow 的 angle 欄位常為「度」，轉為弧度
                     angleRad = p.angle * (Math.PI / 180);
                 } else if (typeof p.rotation === 'number') {
                     angleRad = p.rotation;
@@ -488,7 +486,6 @@
         boxes.sort((a, b) => area(b) - area(a));
 
         return boxes.slice(0, params.maxObjects).map(b => {
-            // normalizeBoxes 已保證 angle 為弧度，此處轉為度數供既有幾何邏輯使用
             let angleDeg = b.angle * (180 / Math.PI);
 
             return {
@@ -680,7 +677,7 @@
             const bgText = det.bgMode === 'dark' ? '黑底' : '白底';
             return `<span class="badge cv">OpenCV · ${bgText}</span>`;
         }
-        if (det.method === 'ai') return `<span class="badge ai">Roboflow Hosted</span>`;
+        if (det.method === 'ai') return `<span class="badge ai">Roboflow Serverless</span>`;
         if (det.method === 'none') return `<span class="badge err">縮圖失敗</span>`;
         return `<span class="badge err" title="${escapeHtml(det.error || '')}">失敗</span>`;
     }
@@ -822,7 +819,6 @@
 
         resetState();
         const gen = generation;
-        // ❌ 已移除：if (DOM.selDetectMode.value !== 'cv') loadModel().catch(() => {});
         state.files = validFiles;
         DOM.uploadText.textContent = `已選擇 ${state.files.length} 張圖片`;
         DOM.processBtn.disabled = true;
